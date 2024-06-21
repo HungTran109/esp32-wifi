@@ -111,21 +111,8 @@ void wifi_change_info(char *ssid, char *password)
     m_event_bit_network = xEventGroupCreate();
 
     ESP_ERROR_CHECK(esp_wifi_stop() );
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
-
-    esp_event_handler_instance_t instance_any_id;
-    esp_event_handler_instance_t instance_got_ip;
-    ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT,
-                                                        ESP_EVENT_ANY_ID,
-                                                        &wifi_event_handler,
-                                                        NULL,
-                                                        &instance_any_id));
-    ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT,
-                                                        IP_EVENT_STA_GOT_IP,
-                                                        &wifi_event_handler,
-                                                        NULL,
-                                                        &instance_got_ip));
+    // wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    // ESP_ERROR_CHECK(esp_wifi_init(&cfg));
 
     wifi_config_t wifi_config = {
         .sta = {
@@ -141,6 +128,7 @@ void wifi_change_info(char *ssid, char *password)
     };
     sprintf((char *)wifi_config.sta.ssid, "%s", ssid);
     sprintf((char *)wifi_config.sta.password, "%s", password);
+    if (strlen(password) < 8) wifi_config.sta.threshold.authmode = WIFI_AUTH_OPEN;
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config) );
     ESP_ERROR_CHECK(esp_wifi_start() );
 
@@ -186,6 +174,7 @@ void wifi_init_sta(char *ssid, char *password)
     };
     sprintf((char *)wifi_config.sta.ssid, "%s", ssid);
     sprintf((char *)wifi_config.sta.password, "%s", password);
+    if (strlen(password) < 8) wifi_config.sta.threshold.authmode = WIFI_AUTH_OPEN;
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA) );
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config) );
     ESP_ERROR_CHECK(esp_wifi_start() );
@@ -293,6 +282,20 @@ static void cmd_ping_on_ping_success(esp_ping_handle_t hdl, void *args)
     printf("%" PRIu32 " bytes from %s icmp_seq=%" PRIu16 " ttl=%" PRIu16 " time=%" PRIu32 " ms\n",
            recv_len, ipaddr_ntoa((ip_addr_t *)&target_addr), seqno, ttl, elapsed_time);
 }
+static void cmd_ping_on_ping_end(esp_ping_handle_t hdl, void *args)
+{
+    int transmitted;
+    int received;
+    int total_time_ms;
+
+    esp_ping_get_profile(hdl, ESP_PING_PROF_REQUEST, &transmitted, sizeof(transmitted));
+    esp_ping_get_profile(hdl, ESP_PING_PROF_REPLY, &received, sizeof(received));
+    esp_ping_get_profile(hdl, ESP_PING_PROF_DURATION, &total_time_ms, sizeof(total_time_ms));
+    printf("%u packets transmitted, %u received, time %u ms\n", transmitted, received, total_time_ms);
+
+    esp_ping_stop(hdl);
+    esp_ping_delete_session(hdl);
+}
 static int do_ping_cmd(void)
 {
     // Ping configuration
@@ -308,12 +311,18 @@ static int do_ping_cmd(void)
     esp_ping_callbacks_t cbs = {
         .cb_args = NULL,
         .on_ping_success = cmd_ping_on_ping_success,
+        .on_ping_end = cmd_ping_on_ping_end
     };
 
     // Ping session parameters: (config - ping configuration, cbs - callback functions, hdl_out  - handle of ping session)
     esp_ping_handle_t ping;
     esp_ping_new_session(&config, &cbs, &ping);
     esp_ping_start(ping);
+
+    // vTaskDelay(5000 / portTICK_PERIOD_MS);
+
+    // esp_ping_stop(ping);
+    // esp_ping_delete_session(ping);
 
     return 0;
 }
@@ -378,7 +387,7 @@ static void ping_task (void *pvParameters)
         {
             do_ping_cmd();
         }
-        vTaskDelay(6000 / portTICK_PERIOD_MS);
+        vTaskDelay(12000 / portTICK_PERIOD_MS);
     }
 }
 
@@ -431,7 +440,7 @@ void app_main(void)
     ESP_ERROR_CHECK(ret);
 
     ESP_LOGI(TAG, "ESP_WIFI_MODE_STA");
-    wifi_init_sta("BTIOT", "bytech123");
+    wifi_init_sta("Kaka", "");
 
     xTaskCreate(cli_task, "cli_task", 4096, NULL, 12, NULL);
     xTaskCreate(ping_task, "ping_task", 4096, NULL, 12, NULL);
