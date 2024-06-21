@@ -37,8 +37,7 @@
 #define TXD_PIN             GPIO_NUM_2
 #define RXD_PIN             GPIO_NUM_3
 
-#define EX_UART_NUM         UART_NUM_0
-
+#define EX_UART_NUM         UART_NUM_1
 #define BUF_SIZE (1024)
 #define RD_BUF_SIZE (BUF_SIZE)
 static QueueHandle_t uart0_queue;
@@ -57,30 +56,18 @@ void RxData_Handle(uint8_t* Rxdata, int length);
 /* FreeRTOS event group to signal when we are connected*/
 static EventGroupHandle_t m_event_bit_network;
 
-/* The event group allows multiple bits for each event, but we only care about two events:
- * - we are connected to the AP with an IP
- * - we failed to connect after the maximum amount of retries */
+
 #define BIT_WIFI_GOT_IP    BIT0
 #define WIFI_FAIL_BIT      BIT1
-
-#define RECONNECT_WIFI_IN_IDLE      5000
-
 
 static const char *TAG = "wifi station";
 
 static int s_retry_num = 0;
-
 static WifiInfo_t m_wifi_info;
-static esp_netif_t *m_wifi_if;
-static network_interface_t m_network_interface = NETWORK_INTERFACE_UNKNOWN;
-static bool m_wifi_connected = false;
-static bool m_wifi_started = false;
-static char m_ip[2][24];
 
 static void wifi_event_handler(void *arg, esp_event_base_t event_base,
                           int32_t event_id, void *event_data)
 {
-    ESP_LOGI(TAG, "HHHHHHHHHHHHHHHHHHHHHHH");
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
         esp_wifi_connect();
     } 
@@ -100,45 +87,6 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
         ESP_LOGI(TAG, "got ip:" IPSTR, IP2STR(&event->ip_info.ip));
         s_retry_num = 0;
         xEventGroupSetBits(m_event_bit_network, BIT_WIFI_GOT_IP);
-    }
-}
-static void wifi_got_ip_event_handler(void *arg, esp_event_base_t event_base,
-                                 int32_t event_id, void *event_data)
-{
-    ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
-    //esp_netif_ip_info_t *ip_info = &event->ip_info;
-
-    ESP_LOGI(TAG, "got ip:" IPSTR, IP2STR(&event->ip_info.ip));
-
-    s_retry_num = 0;
-    m_wifi_connected = true;
-    xEventGroupSetBits(m_event_bit_network, BIT_WIFI_GOT_IP);
-}
-static void wifi_create_default(void)
-{
-    static bool created = false;
-    if (created == false)
-    {
-        created = true;
-        m_wifi_if = esp_netif_create_default_wifi_sta();
-        wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-        ESP_ERROR_CHECK(esp_wifi_init(&cfg));
-
-        esp_event_handler_instance_t instance_any_id;
-        esp_event_handler_instance_t instance_got_ip;
-        ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT,
-                                                            ESP_EVENT_ANY_ID,
-                                                            &wifi_event_handler,
-                                                            NULL,
-                                                            &instance_any_id));
-        ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT,
-                                                            IP_EVENT_STA_GOT_IP,
-                                                            &wifi_event_handler,
-                                                            NULL,
-                                                            &instance_got_ip));
-
-        ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_got_ip_event_handler, NULL));
-        ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     }
 }
 void wifi_change_info(char *ssid, char *password)
@@ -248,7 +196,6 @@ static void uart_event_task(void *pvParameters)
                     int data_len = uart_read_bytes(EX_UART_NUM, data, event.size, portMAX_DELAY);
 
                     RxData_Handle(data, data_len);
-                    //vTaskDelay(20 / portTICK_PERIOD_MS);
                     //uart_write_bytes(EX_UART_NUM, (const char*) data, data_size);
                     break;
                 //Event of HW FIFO overflow detected
@@ -280,19 +227,21 @@ static void uart_event_task(void *pvParameters)
                     break;
             }
         }
+        vTaskDelay(2000 / portTICK_PERIOD_MS);
     }
     free(data);
     data = NULL;
     vTaskDelete(NULL);
 }
+
 void RxData_Handle(uint8_t* Rxdata, int length)
 {
-    if(length > 0)
+    if (length > 0)
     {    
         if (strstr((char*)Rxdata, "wifi:") != NULL)
         {
             //uart_write_bytes(EX_UART_NUM, (char*)Rxdata, length);
-            //ESP_LOGE(TAG, "RxData_Handle!!!!!!!!!!!!!!!!!!");
+            ESP_LOGE(TAG, "rx : %s", (char *) Rxdata);
 
             char *pTemp = strstr((char*)Rxdata,"wifi:");
 		
@@ -335,8 +284,9 @@ void uart_init(void)
     //Set UART pins (using UART0 default pins ie no changes.)
     uart_set_pin(EX_UART_NUM, TXD_PIN, RXD_PIN, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
 
+    vTaskDelay(2000 / portTICK_PERIOD_MS);
     //Create a task to handler UART event from ISR
-    //xTaskCreate(uart_event_task, "uart_event_task", 2048, NULL, 12, NULL);
+    xTaskCreate(uart_event_task, "uart_event_task", 4096, NULL, 12, NULL);
 }
 static bool m_wifi_enable = false;
 static bool do_reconnect_wifi = false;
@@ -349,8 +299,8 @@ static void wifi_process(void)
     if (do_reconnect_wifi)
     {
         do_reconnect_wifi = false;
-        ESP_LOGI(TAG, "ESP_WIFI_MODE_STA!!!!!!!!!!!!!!!!!!!!!!!!!!");
-        wifi_change_info("BTIOT", "bytech123");
+        ESP_LOGE(TAG, "wifi_process");
+        wifi_change_info(m_wifi_info.ssid, m_wifi_info.pass);
     }
 }
 void app_main(void)
@@ -364,38 +314,37 @@ void app_main(void)
     ESP_ERROR_CHECK(ret);
 
     ESP_LOGI(TAG, "ESP_WIFI_MODE_STA");
-    wifi_init_sta("BTIOT", "bytech1234");
+    wifi_init_sta("BTIOT", "bytech123");
 
     uart_init();
     m_wifi_info.status = 0;
+
     
     while (1)
     {
-        static uint8_t count = 0;
-        if (count < 2)
+        if (strstr((char *)m_wifi_info.cmd, "enable"))
         {
-            count++;
-            // Write data to UART.
-            char* test_str = "wifi:1,BTIOT,bytech1234,";
-            uart_write_bytes(EX_UART_NUM, (const char*)test_str, strlen(test_str));
-
-            if (count == 2)
+            if (m_wifi_info.status != 1)
             {
-                // if (strstr((char *)m_wifi_info.cmd, "1"))
-                // {
-                //     if (m_wifi_info.status != 1)
-                //     {
-                //         m_wifi_info.status = 1;
-                //         do_reconnect_wifi = true;
-                //         m_wifi_enable = true;
-                //     }
-                // }
+                m_wifi_info.status = 1;
                 do_reconnect_wifi = true;
                 m_wifi_enable = true;
-                wifi_process();
             }
         }
-        vTaskDelay(10000 / portTICK_PERIOD_MS);
+        wifi_process();
+
+        ESP_LOGI(TAG, "2s");
+        static int count = 0;
+        if (count++ == 6)
+        {
+            // Write data to UART.
+            char* test_str = "wifi:enable,BYTECH,bytech@2020,";
+            uart_write_bytes(EX_UART_NUM, (const char*)test_str, strlen(test_str));
+            // sprintf(m_wifi_info.cmd,"%s", "enable");
+            // sprintf(m_wifi_info.ssid,"%s", "BYTECH");
+            // sprintf(m_wifi_info.pass,"%s", "bytech@2020");
+        }
+        vTaskDelay(2000 / portTICK_PERIOD_MS);
     }
     
 }
