@@ -20,10 +20,17 @@
 #include "driver/uart.h"
 #include "esp_log.h"
 #include "network.h"
+#include "app_cli.h"
+#include "app_shell.h"
 
 #include "driver/gpio.h"
 #include "lwip/err.h"
 #include "lwip/sys.h"
+#include "lwip/inet.h"
+#include "lwip/netdb.h"
+#include "lwip/sockets.h"
+#include "lwip/ip_addr.h"
+#include "ping/ping_sock.h"
 
 /* The examples use WiFi configuration that you can set via project configuration menu
 
@@ -34,8 +41,8 @@
 #define ESP_WIFI_PASS      CONFIG_ESP_WIFI_PASSWORD
 #define ESP_MAXIMUM_RETRY  0
 
-#define TXD_PIN             GPIO_NUM_2
-#define RXD_PIN             GPIO_NUM_3
+#define TXD_PIN             GPIO_NUM_19
+#define RXD_PIN             GPIO_NUM_20
 
 #define EX_UART_NUM         UART_NUM_1
 #define BUF_SIZE (1024)
@@ -63,7 +70,7 @@ static EventGroupHandle_t m_event_bit_network;
 static const char *TAG = "wifi station";
 
 static int s_retry_num = 0;
-static WifiInfo_t m_wifi_info;
+WifiInfo_t m_wifi_info;
 
 static void wifi_event_handler(void *arg, esp_event_base_t event_base,
                           int32_t event_id, void *event_data)
@@ -73,7 +80,6 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
     } 
     else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) 
     {
-        xEventGroupClearBits(m_event_bit_network, BIT_WIFI_GOT_IP);
         if (s_retry_num < ESP_MAXIMUM_RETRY) {
             esp_wifi_connect();
                 s_retry_num++;
@@ -88,6 +94,15 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
         s_retry_num = 0;
         xEventGroupSetBits(m_event_bit_network, BIT_WIFI_GOT_IP);
     }
+}
+bool network_is_connected(void)
+{
+    EventBits_t network = xEventGroupGetBits(m_event_bit_network);
+    if (network & BIT_WIFI_GOT_IP)
+    {
+        return true;
+    }
+    return false;
 }
 void wifi_change_info(char *ssid, char *password)
 {
@@ -264,6 +279,108 @@ void RxData_Handle(uint8_t* Rxdata, int length)
         }
     }
 }
+static void cmd_ping_on_ping_success(esp_ping_handle_t hdl, void *args)
+{
+    uint8_t ttl;
+    uint16_t seqno;
+    uint32_t elapsed_time, recv_len;
+    ip_addr_t target_addr;
+    esp_ping_get_profile(hdl, ESP_PING_PROF_SEQNO, &seqno, sizeof(seqno));
+    esp_ping_get_profile(hdl, ESP_PING_PROF_TTL, &ttl, sizeof(ttl));
+    esp_ping_get_profile(hdl, ESP_PING_PROF_IPADDR, &target_addr, sizeof(target_addr));
+    esp_ping_get_profile(hdl, ESP_PING_PROF_SIZE, &recv_len, sizeof(recv_len));
+    esp_ping_get_profile(hdl, ESP_PING_PROF_TIMEGAP, &elapsed_time, sizeof(elapsed_time));
+    printf("%" PRIu32 " bytes from %s icmp_seq=%" PRIu16 " ttl=%" PRIu16 " time=%" PRIu32 " ms\n",
+           recv_len, ipaddr_ntoa((ip_addr_t *)&target_addr), seqno, ttl, elapsed_time);
+}
+static int do_ping_cmd(void)
+{
+    // Ping configuration
+    esp_ping_config_t config = ESP_PING_DEFAULT_CONFIG();
+
+    // IP address
+    config.target_addr.type = IPADDR_TYPE_V4;
+    ipaddr_aton("8.8.8.8", &config.target_addr);
+    const char *ip_string = ipaddr_ntoa(&config.target_addr);
+    printf("IP Address for config.target_addr: %s\n", ip_string);
+
+    // Set callback function
+    esp_ping_callbacks_t cbs = {
+        .cb_args = NULL,
+        .on_ping_success = cmd_ping_on_ping_success,
+    };
+
+    // Ping session parameters: (config - ping configuration, cbs - callback functions, hdl_out  - handle of ping session)
+    esp_ping_handle_t ping;
+    esp_ping_new_session(&config, &cbs, &ping);
+    esp_ping_start(ping);
+
+    return 0;
+}
+static int cli_console_puts(const char *msg)
+{
+    if (msg)
+    {
+        printf("%s", msg);
+        fflush(stdout);
+    }
+    return 0;
+}
+void cli_console_write(uint8_t *buffer, uint32_t size)
+{
+    if (!buffer)
+    {
+        return;
+    }
+    for (int i = 0; i < size; i++)
+    {
+        putchar(buffer[i]);
+    }
+    fflush(stdout);
+}
+void cli_console_close()
+{
+}
+
+static app_cli_cb_t m_tcp_cli = 
+{
+    .puts = cli_console_write,
+    .printf = cli_console_puts,
+    .terminate = cli_console_close
+};
+
+static void cli_task (void *pvParameters)
+{
+    app_cli_start(&m_tcp_cli);
+    for (;;)
+    {
+        while (1)
+        {
+            char c = getchar();
+            if (c == 0xFF)
+            {
+                break;
+            }
+            else
+            {
+                app_cli_poll(c);
+            }
+        }
+        vTaskDelay(10);
+    }
+}
+
+static void ping_task (void *pvParameters)
+{
+    for (;;)
+    {
+        if (network_is_connected())
+        {
+            do_ping_cmd();
+        }
+        vTaskDelay(6000 / portTICK_PERIOD_MS);
+    }
+}
 
 void uart_init(void)
 {
@@ -288,8 +405,8 @@ void uart_init(void)
     //Create a task to handler UART event from ISR
     xTaskCreate(uart_event_task, "uart_event_task", 4096, NULL, 12, NULL);
 }
-static bool m_wifi_enable = false;
-static bool do_reconnect_wifi = false;
+bool m_wifi_enable = false;
+bool do_reconnect_wifi = false;
 static void wifi_process(void)
 {
     if (m_wifi_enable == false)
@@ -316,35 +433,23 @@ void app_main(void)
     ESP_LOGI(TAG, "ESP_WIFI_MODE_STA");
     wifi_init_sta("BTIOT", "bytech123");
 
-    uart_init();
-    m_wifi_info.status = 0;
-
+    xTaskCreate(cli_task, "cli_task", 4096, NULL, 12, NULL);
+    xTaskCreate(ping_task, "ping_task", 4096, NULL, 12, NULL);
+    //uart_init();
     
     while (1)
     {
-        if (strstr((char *)m_wifi_info.cmd, "enable"))
-        {
-            if (m_wifi_info.status != 1)
-            {
-                m_wifi_info.status = 1;
-                do_reconnect_wifi = true;
-                m_wifi_enable = true;
-            }
-        }
         wifi_process();
 
         ESP_LOGI(TAG, "2s");
-        static int count = 0;
-        if (count++ == 6)
-        {
-            // Write data to UART.
-            char* test_str = "wifi:enable,BYTECH,bytech@2020,";
-            uart_write_bytes(EX_UART_NUM, (const char*)test_str, strlen(test_str));
-            // sprintf(m_wifi_info.cmd,"%s", "enable");
-            // sprintf(m_wifi_info.ssid,"%s", "BYTECH");
-            // sprintf(m_wifi_info.pass,"%s", "bytech@2020");
-        }
-        vTaskDelay(2000 / portTICK_PERIOD_MS);
+        // static int count = 0;
+        // if (count++ == 6)
+        // {
+        //     // Write data to UART.
+        //     char* test_str = "wifi:enable,BYTECH,bytech@2020,";
+        //     uart_write_bytes(EX_UART_NUM, (const char*)test_str, strlen(test_str));
+        // }
+        vTaskDelay(2000/ portTICK_PERIOD_MS);
     }
     
 }
