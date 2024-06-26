@@ -39,16 +39,23 @@
 #include "esp_log.h"
 #include "esp_system.h"
 #include "network.h"
+#include "esp_wifi.h"
+#include "app_debug.h"
 
 static const char *TAG = "cli";
 
 static int32_t cli_reset(p_shell_context_t context, int32_t argc, char **argv);
+static int32_t cli_reboot(p_shell_context_t context, int32_t argc, char **argv);
 static int32_t cli_handle_wifi_cfg(p_shell_context_t context, int32_t argc, char **argv);
+static int32_t cli_set_max_tx_power(p_shell_context_t context, int32_t argc, char **argv);
 
 static const shell_command_context_t cli_command_table[] =
 {
     {"reset", "\treset: Reset\r\n", cli_reset, 0},
     {"wifi", "\tconfig: Config wifi ssid, pass\r\n", cli_handle_wifi_cfg, 3},
+    {"reboot", "\treboot: Restart\r\n", cli_reboot, 0},
+    {"tx_power", "\ttx_power: Set max tx power\r\n", cli_set_max_tx_power, 1}
+
 };
 
 static shell_context_struct m_user_context;
@@ -86,6 +93,12 @@ static int32_t cli_reset(p_shell_context_t context, int32_t argc, char **argv)
     return 0;
 }
 
+static int32_t cli_reboot(p_shell_context_t context, int32_t argc, char **argv)
+{
+    esp_restart();
+    return 0;
+}
+
 static void printf_hex_str(char *input, int len)
 {
     printf("\r\n");
@@ -102,10 +115,11 @@ static void printf_hex_str(char *input, int len)
 extern bool m_wifi_enable;
 extern bool do_reconnect_wifi;
 extern WifiInfo_t m_wifi_info;
+extern EventGroupHandle_t m_event_bit_network;
 
 static int32_t cli_handle_wifi_cfg(p_shell_context_t context, int32_t argc, char **argv)
 {
-    if (strstr(argv[1], "enable"))
+    if (strstr(argv[1], "1"))
     {
         sprintf(m_wifi_info.ssid,"%s", argv[2]);
         sprintf(m_wifi_info.pass,"%s", argv[3]);
@@ -113,6 +127,24 @@ static int32_t cli_handle_wifi_cfg(p_shell_context_t context, int32_t argc, char
         ESP_LOGI(TAG, "%s, %s", m_wifi_info.ssid, m_wifi_info.pass);
         m_wifi_enable = true;
         do_reconnect_wifi = true;
+    }
+    else if (strstr(argv[1], "0"))
+    {
+        DEBUG_INFO("TURN OFF WIFI!\r\n");
+        m_event_bit_network = xEventGroupCreate();
+        xEventGroupSetBits(m_event_bit_network, WIFI_FAIL_BIT);
+        esp_wifi_disconnect();
+    }
+    return 0;
+}
+
+static int32_t cli_set_max_tx_power(p_shell_context_t context, int32_t argc, char **argv)
+{
+    if (argv[1])
+    {
+        int8_t power = atoi(argv[1]);
+        DEBUG_INFO("SET MAX TX_POWER = %d", power);
+        esp_wifi_set_max_tx_power(power);
     }
     return 0;
 }

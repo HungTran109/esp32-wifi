@@ -4,6 +4,8 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+#define BIT_WIFI_GOT_IP    BIT0
+#define WIFI_FAIL_BIT      BIT1
 typedef struct 
 {
     char cmd[20];

@@ -23,6 +23,10 @@
 #include "app_cli.h"
 #include "app_shell.h"
 
+#include "tinyusb.h"
+#include "tusb_cdc_acm.h"
+#include "app_debug.h"
+
 #include "driver/gpio.h"
 #include "lwip/err.h"
 #include "lwip/sys.h"
@@ -61,16 +65,68 @@ void RxData_Handle(uint8_t* Rxdata, int length);
 #define EXAMPLE_H2E_IDENTIFIER CONFIG_ESP_WIFI_PW_ID
 #endif
 /* FreeRTOS event group to signal when we are connected*/
-static EventGroupHandle_t m_event_bit_network;
+EventGroupHandle_t m_event_bit_network;
+static SemaphoreHandle_t m_semaphore_cdc_data;
+static SemaphoreHandle_t m_debug_lock;
 
+#define CDC_APP_BUFFER_SIZE 256
 
-#define BIT_WIFI_GOT_IP    BIT0
-#define WIFI_FAIL_BIT      BIT1
+typedef struct
+{
+    uint8_t buf[CDC_APP_BUFFER_SIZE];
+    uint16_t index;
+} cdc_rx_buffer_t;
 
 static const char *TAG = "wifi station";
 
 static int s_retry_num = 0;
 WifiInfo_t m_wifi_info;
+static cdc_rx_buffer_t m_cdc_rx_buf;
+
+// Process RX data
+static void application_on_rx_callback(uint8_t *data, uint32_t len)
+{
+    // if (len >= 5 && memcmp(m_cdc_rx_buf.buf, "Hello", len) == 0)
+    // {
+    //     DEBUG_INFO(TAG, "Helooo!!!!!!!!!!!!!!!!!!!!!!!");
+    // }
+    for (uint32_t count = 0; count < len; count++)
+    {
+        app_cli_poll(data[count]);
+    }
+}
+void tinyusb_cdc_rx_callback(int itf, cdcacm_event_t *event)
+{
+    xSemaphoreGive(m_semaphore_cdc_data);
+}
+// // Connect & disconnect event callback
+// static void application_on_disconnected_callback()
+// {
+//     char* send_str = "application disconnected";
+//     tinyusb_cdcacm_write_queue(0, (uint8_t *)send_str, strlen(send_str));
+//     tinyusb_cdcacm_write_flush(0, 0);
+// }
+
+// static void application_on_connected_callback(void)
+// {
+//     char* send_str = "application connected";
+//     tinyusb_cdcacm_write_queue(0, (uint8_t *)send_str, strlen(send_str));
+//     tinyusb_cdcacm_write_flush(0, 0);
+// }
+void tinyusb_cdc_line_state_changed_callback(int itf, cdcacm_event_t *event)
+{
+    int dtr = event->line_state_changed_data.dtr;
+    int rts = event->line_state_changed_data.rts;
+    DEBUG_INFO("Line state changed on channel %d: DTR:%d, RTS:%d\r\n", itf, dtr, rts);
+    // if (dtr == 1 && rts == 1)
+    // {
+    //     application_on_connected_callback();
+    // }
+    // else if (dtr == 0 && rts == 1)
+    // {
+    //     application_on_disconnected_callback();
+    // }
+}
 
 static void wifi_event_handler(void *arg, esp_event_base_t event_base,
                           int32_t event_id, void *event_data)
@@ -83,14 +139,15 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
         if (s_retry_num < ESP_MAXIMUM_RETRY) {
             esp_wifi_connect();
                 s_retry_num++;
-            ESP_LOGI(TAG, "retry to connect to the AP");
+            DEBUG_INFO("retry to connect to the AP\r\n");
         } else {
             xEventGroupSetBits(m_event_bit_network, WIFI_FAIL_BIT);
         }
-        ESP_LOGI(TAG,"connect to the AP fail");
+        DEBUG_INFO("connect to the AP fail\r\n");
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
-        ESP_LOGI(TAG, "got ip:" IPSTR, IP2STR(&event->ip_info.ip));
+        DEBUG_INFO("got ip:" IPSTR, IP2STR(&event->ip_info.ip));
+        DEBUG_INFO("\r\n");
         s_retry_num = 0;
         xEventGroupSetBits(m_event_bit_network, BIT_WIFI_GOT_IP);
     }
@@ -106,7 +163,7 @@ bool network_is_connected(void)
 }
 void wifi_change_info(char *ssid, char *password)
 {
-    ESP_LOGI(TAG, "Wifi user name %s, pass %s\r\n", ssid, password);
+    DEBUG_INFO("Wifi user name %s, pass %s\r\n", ssid, password);
 
     m_event_bit_network = xEventGroupCreate();
 
@@ -128,11 +185,11 @@ void wifi_change_info(char *ssid, char *password)
     };
     sprintf((char *)wifi_config.sta.ssid, "%s", ssid);
     sprintf((char *)wifi_config.sta.password, "%s", password);
-    if (strlen(password) < 8) wifi_config.sta.threshold.authmode = WIFI_AUTH_OPEN;
+    if (strlen(password) < 3) wifi_config.sta.threshold.authmode = WIFI_AUTH_OPEN;
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config) );
     ESP_ERROR_CHECK(esp_wifi_start() );
 
-    ESP_LOGI(TAG, "wifi_init_sta finished.");
+    DEBUG_INFO("wifi_init_sta finished.\r\n");
 }
 
 void wifi_init_sta(char *ssid, char *password)
@@ -174,12 +231,12 @@ void wifi_init_sta(char *ssid, char *password)
     };
     sprintf((char *)wifi_config.sta.ssid, "%s", ssid);
     sprintf((char *)wifi_config.sta.password, "%s", password);
-    if (strlen(password) < 8) wifi_config.sta.threshold.authmode = WIFI_AUTH_OPEN;
+    if (strlen(password) < 3) wifi_config.sta.threshold.authmode = WIFI_AUTH_OPEN;
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA) );
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config) );
     ESP_ERROR_CHECK(esp_wifi_start() );
 
-    ESP_LOGI(TAG, "wifi_init_sta finished.");
+    DEBUG_INFO("wifi_init_sta finished.\r\n");
 }
 
 static void uart_event_task(void *pvParameters)
@@ -245,7 +302,7 @@ void RxData_Handle(uint8_t* Rxdata, int length)
         if (strstr((char*)Rxdata, "wifi:") != NULL)
         {
             //uart_write_bytes(EX_UART_NUM, (char*)Rxdata, length);
-            ESP_LOGE(TAG, "rx : %s", (char *) Rxdata);
+            DEBUG_ERROR("rx : %s\r\n", (char *) Rxdata);
 
             char *pTemp = strstr((char*)Rxdata,"wifi:");
 		
@@ -264,7 +321,7 @@ void RxData_Handle(uint8_t* Rxdata, int length)
 
             sprintf(m_wifi_info.pass,"%s", pTemp);
 
-            ESP_LOGI(TAG, "%s, %s, %s", m_wifi_info.cmd, m_wifi_info.ssid, m_wifi_info.pass);
+            DEBUG_INFO("%s, %s, %s\r\n", m_wifi_info.cmd, m_wifi_info.ssid, m_wifi_info.pass);
         }
     }
 }
@@ -279,7 +336,7 @@ static void cmd_ping_on_ping_success(esp_ping_handle_t hdl, void *args)
     esp_ping_get_profile(hdl, ESP_PING_PROF_IPADDR, &target_addr, sizeof(target_addr));
     esp_ping_get_profile(hdl, ESP_PING_PROF_SIZE, &recv_len, sizeof(recv_len));
     esp_ping_get_profile(hdl, ESP_PING_PROF_TIMEGAP, &elapsed_time, sizeof(elapsed_time));
-    printf("%" PRIu32 " bytes from %s icmp_seq=%" PRIu16 " ttl=%" PRIu16 " time=%" PRIu32 " ms\n",
+    DEBUG_RAW("%u bytes from %s icmp_seq=%u ttl=%u time=%u ms\r\n",
            recv_len, ipaddr_ntoa((ip_addr_t *)&target_addr), seqno, ttl, elapsed_time);
 }
 static void cmd_ping_on_ping_end(esp_ping_handle_t hdl, void *args)
@@ -291,7 +348,7 @@ static void cmd_ping_on_ping_end(esp_ping_handle_t hdl, void *args)
     esp_ping_get_profile(hdl, ESP_PING_PROF_REQUEST, &transmitted, sizeof(transmitted));
     esp_ping_get_profile(hdl, ESP_PING_PROF_REPLY, &received, sizeof(received));
     esp_ping_get_profile(hdl, ESP_PING_PROF_DURATION, &total_time_ms, sizeof(total_time_ms));
-    printf("%u packets transmitted, %u received, time %u ms\n", transmitted, received, total_time_ms);
+    DEBUG_RAW("%u packets transmitted, %u received, time %u ms\r\n", transmitted, received, total_time_ms);
 
     esp_ping_stop(hdl);
     esp_ping_delete_session(hdl);
@@ -305,7 +362,7 @@ static int do_ping_cmd(void)
     config.target_addr.type = IPADDR_TYPE_V4;
     ipaddr_aton("8.8.8.8", &config.target_addr);
     const char *ip_string = ipaddr_ntoa(&config.target_addr);
-    printf("IP Address for config.target_addr: %s\n", ip_string);
+    DEBUG_INFO("IP Address for config.target_addr: %s\r\n", ip_string);
 
     // Set callback function
     esp_ping_callbacks_t cbs = {
@@ -361,21 +418,19 @@ static app_cli_cb_t m_tcp_cli =
 static void cli_task (void *pvParameters)
 {
     app_cli_start(&m_tcp_cli);
-    for (;;)
+    char c;
+    while(1)
     {
-        while (1)
+        int nread = fread(&c, 1, 1, stdin);
+        if(nread > 0 && c != 0xFF)
         {
-            char c = getchar();
-            if (c == 0xFF)
-            {
-                break;
-            }
-            else
-            {
-                app_cli_poll(c);
-            }
+            // putchar('x')
+            app_cli_poll(c);
         }
-        vTaskDelay(10);
+        else
+        {
+            vTaskDelay(10/ portTICK_PERIOD_MS);
+        }
     }
 }
 
@@ -388,6 +443,36 @@ static void ping_task (void *pvParameters)
             do_ping_cmd();
         }
         vTaskDelay(12000 / portTICK_PERIOD_MS);
+    }
+}
+bool m_wifi_enable = false;
+bool do_reconnect_wifi = false;
+static void wifi_process(void)
+{
+    if (m_wifi_enable == false)
+    {
+        return;
+    }
+    if (do_reconnect_wifi)
+    {
+        do_reconnect_wifi = false;
+        DEBUG_ERROR("wifi_process\r\n");
+        wifi_change_info(m_wifi_info.ssid, m_wifi_info.pass);
+    }
+}
+static void wifi_task (void *pvParameters)
+{
+    for (;;)
+    {
+        wifi_process();
+
+        static int32_t count_log = 0;
+        if (count_log++ >= 5)
+        {
+            count_log = 0;
+            DEBUG_INFO("10s\r\n");
+        }
+        vTaskDelay(2000/ portTICK_PERIOD_MS);
     }
 }
 
@@ -414,20 +499,41 @@ void uart_init(void)
     //Create a task to handler UART event from ISR
     xTaskCreate(uart_event_task, "uart_event_task", 4096, NULL, 12, NULL);
 }
-bool m_wifi_enable = false;
-bool do_reconnect_wifi = false;
-static void wifi_process(void)
+uint32_t debug_serial_print(const void *buffer, uint32_t len)
 {
-    if (m_wifi_enable == false)
+    char *ptr = (char*)buffer;
+    for (int i = 0; i < len; i++)
     {
-        return;
+        putchar(ptr[i]);
     }
-    if (do_reconnect_wifi)
+    // fflush(stdout);
+    return len;
+}
+uint32_t debug_tiny_usb_print(const void *buffer, uint32_t len)
+{
+    char *ptr = (char*)buffer;
+    for (int i = 0; i < len; i++)
     {
-        do_reconnect_wifi = false;
-        ESP_LOGE(TAG, "wifi_process");
-        wifi_change_info(m_wifi_info.ssid, m_wifi_info.pass);
+        tinyusb_cdcacm_write_queue(0, (uint8_t *)&ptr[i], 1);
+        tinyusb_cdcacm_write_flush(0, 0);
     }
+    // fflush(stdout);
+    return len;
+}
+uint32_t debug_get_ms()
+{
+    return xTaskGetTickCount();
+}
+
+
+bool debug_get_lock(bool lock, uint32_t timeout_ms)
+{
+    if (lock)
+    {
+        return xSemaphoreTake(m_debug_lock, timeout_ms);
+    }
+    xSemaphoreGive(m_debug_lock);
+    return true;
 }
 void app_main(void)
 {
@@ -439,26 +545,123 @@ void app_main(void)
     }
     ESP_ERROR_CHECK(ret);
 
-    ESP_LOGI(TAG, "ESP_WIFI_MODE_STA");
+    m_debug_lock = xSemaphoreCreateMutex();
+    xSemaphoreGive(m_debug_lock);
+    app_debug_init(debug_get_ms, debug_get_lock);
+    app_debug_register_callback_print(debug_tiny_usb_print);
+    app_debug_register_callback_print(debug_serial_print);
+
+    DEBUG_INFO("ESP_WIFI_MODE_STA\r\n");
     wifi_init_sta("Kaka", "");
 
-    xTaskCreate(cli_task, "cli_task", 4096, NULL, 12, NULL);
+    xTaskCreate(cli_task, "cli_task", 4096, NULL, 13, NULL);
     xTaskCreate(ping_task, "ping_task", 4096, NULL, 12, NULL);
+    xTaskCreate(wifi_task, "wifi_task", 4096, NULL, 12, NULL);
     //uart_init();
-    
+
+    m_semaphore_cdc_data = xSemaphoreCreateCounting(10, 0);
+    const tinyusb_config_t tusb_cfg = {
+        .device_descriptor = NULL,
+        .string_descriptor = NULL,
+        .external_phy = false,
+        .configuration_descriptor = NULL,
+    };
+
+    ESP_ERROR_CHECK(tinyusb_driver_install(&tusb_cfg));
+
+    tinyusb_config_cdcacm_t acm_cfg = {
+        .usb_dev = TINYUSB_USBDEV_0,
+        .cdc_port = TINYUSB_CDC_ACM_0,
+        .rx_unread_buf_sz = 256,
+        .callback_rx = &tinyusb_cdc_rx_callback, // the first way to register a callback
+        .callback_rx_wanted_char = NULL,
+        .callback_line_state_changed = NULL,
+        .callback_line_coding_changed = NULL
+    };
+
+    ESP_ERROR_CHECK(tusb_cdc_acm_init(&acm_cfg));
+    /* the second way to register a callback */
+    ESP_ERROR_CHECK(tinyusb_cdcacm_register_callback(
+                        TINYUSB_CDC_ACM_0,
+                        CDC_EVENT_LINE_STATE_CHANGED,
+                        &tinyusb_cdc_line_state_changed_callback));
+int retries_received = 2;
+    int wait_time = 50;
+    uint8_t tmp[CONFIG_TINYUSB_CDC_RX_BUFSIZE];
+    size_t rx_size = 0;
     while (1)
     {
-        wifi_process();
+        bool allow_process = false;
+        while (xSemaphoreTake(m_semaphore_cdc_data, wait_time))
+        {
+            if (retries_received)
+            {
+                retries_received--;
+                wait_time = 50;
+            }
 
-        ESP_LOGI(TAG, "2s");
-        // static int count = 0;
-        // if (count++ == 6)
+            /* read */
+            esp_err_t ret = tinyusb_cdcacm_read(0, tmp, CONFIG_TINYUSB_CDC_RX_BUFSIZE, &rx_size);
+            if (ret != ESP_OK) 
+            {
+                DEBUG_ERROR("CDC usb RX error\r\n");
+                continue;
+            } 
+
+            int max_size = CDC_APP_BUFFER_SIZE-m_cdc_rx_buf.index;
+            if (max_size < rx_size)
+            {
+                DEBUG_ERROR("Ringbuffer USB CDC full\r\n");
+            }
+            else
+            {
+                max_size = rx_size;
+            }
+
+            memcpy(m_cdc_rx_buf.buf+m_cdc_rx_buf.index, tmp, max_size);
+            m_cdc_rx_buf.index += max_size;
+
+            allow_process = true;
+            /* write back */
+            tinyusb_cdcacm_write_queue(0, m_cdc_rx_buf.buf, rx_size);
+            tinyusb_cdcacm_write_flush(0, 0);
+        }
+        // else if (retries_received)
         // {
-        //     // Write data to UART.
-        //     char* test_str = "wifi:enable,BYTECH,bytech@2020,";
-        //     uart_write_bytes(EX_UART_NUM, (const char*)test_str, strlen(test_str));
+        //     retries_received--;
+        //     if (retries_received == 0)
+        //     {
+        //         retries_received = 0;
+        //         allow_process = true;
+        //         wait_time = 50;
+        //     }
         // }
-        vTaskDelay(2000/ portTICK_PERIOD_MS);
+
+        // Process data
+        if (allow_process && m_cdc_rx_buf.index)
+        {
+            // // // // Read data 
+            esp_err_t ret = tinyusb_cdcacm_read(0, tmp, CONFIG_TINYUSB_CDC_RX_BUFSIZE, &rx_size);
+            if (ret == ESP_OK) 
+            {
+                int max_size = CDC_APP_BUFFER_SIZE-m_cdc_rx_buf.index;
+                if (max_size < rx_size)
+                {
+                    DEBUG_ERROR("Ringbuffer USB CDC full\r\n");
+                }
+                else
+                {
+                    max_size = rx_size;
+                }
+
+                memcpy(m_cdc_rx_buf.buf+m_cdc_rx_buf.index, tmp, max_size);
+                m_cdc_rx_buf.index += max_size;
+            } 
+
+            application_on_rx_callback(m_cdc_rx_buf.buf, m_cdc_rx_buf.index);
+            memset(m_cdc_rx_buf.buf, 0, CDC_APP_BUFFER_SIZE);
+            m_cdc_rx_buf.index = 0;
+        }
     }
     
 }

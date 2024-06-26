@@ -313,7 +313,7 @@ static void process_cmd(p_shell_context_t context, const char *cmd)
             tmp_cmd_str = tmp_cmd->pcCommand;
             tmp_cmd_len = strlen(tmp_cmd_str);
             /* Compare with space or end of string */
-            if ((cmd[tmp_cmd_len] == ' ') || (cmd[tmp_cmd_len] == 0x00))
+            if ((cmd[tmp_cmd_len] == ',') || (cmd[tmp_cmd_len] == 0x00))
             {
                 if (custom_str_cmp(tmp_cmd_str, argv[0], tmp_cmd_len) == 0)
                 {
@@ -514,7 +514,7 @@ static int32_t parse_line(const char *cmd, uint32_t len, char *argv[SHELL_MAX_AR
     while (position < len)
     {
         /* Skip all blanks */
-        while (((char)(*p) == ' ') && (position < len))
+        while (((char)(*p) == ',') && (position < len))
         {
             *p = '\0';
             p++;
@@ -542,7 +542,7 @@ static int32_t parse_line(const char *cmd, uint32_t len, char *argv[SHELL_MAX_AR
         {
             argv[argc] = p;
             argc++;
-            while (((char)*p != ' ') && ((char)*p != '\t') && (position < len))
+            while (((char)*p != ',') && ((char)*p != '\t') && (position < len))
             {
                 p++;
                 position++;
